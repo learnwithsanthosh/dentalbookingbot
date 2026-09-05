@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const admin = require('firebase-admin');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 console.log('admin keys:', Object.keys(admin));
 let serviceAccount;
@@ -67,6 +67,11 @@ app.get('/webhook', (req, res) => {
 });
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const REASON_OPTIONS = {
+  '1': { label: 'Consultation', durationMinutes: 30 },
+  '2': { label: 'Cleaning', durationMinutes: 45 },
+  '3': { label: 'Other', durationMinutes: 30 }
+};
 
 app.post('/webhook', async (req, res) => {
   console.log('Webhook hit!', JSON.stringify(req.body));
@@ -85,6 +90,18 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function handleMessage(from, text) {
+    const normalized = text?.toLowerCase().trim();
+
+  if (normalized === 'restart' || normalized === 'start over') {
+    await saveConversation(from, {
+      state: 'ASK_NAME',
+      name: FieldValue.delete(),
+      reason: FieldValue.delete(),
+      durationMinutes: FieldValue.delete()
+    });
+    await sendWhatsAppMessage(from, "No problem, let's start fresh! What's your name?");
+    return;
+  }
   const convo = await getConversation(from);
 
   if (!convo) {
@@ -98,7 +115,11 @@ async function handleMessage(from, text) {
 
   switch (convo.state) {
     case 'ASK_NAME': {
-      await saveConversation(from, { name: text, state: 'ASK_REASON' });
+      if (!text || text.trim().length < 2) {
+      await sendWhatsAppMessage(from, "Sorry, I didn't quite catch that — could you type your full name?");
+      break;
+      }
+      await saveConversation(from, { name: text, state: 'ASK_REASON',updatedAt: FieldValue.serverTimestamp() });
       await sendWhatsAppMessage(
         from,
         `Thanks, ${text}! What's the reason for your visit?\n\n1. Consultation\n2. Cleaning\n3. Other`
@@ -107,12 +128,30 @@ async function handleMessage(from, text) {
     }
 
     case 'ASK_REASON': {
-      const reasonMap = { '1': 'Consultation', '2': 'Cleaning', '3': 'Other' };
-      const reason = reasonMap[text] || text;
-      await saveConversation(from, { reason, state: 'ASK_SLOT_PLACEHOLDER' });
+      const choice = REASON_OPTIONS[text.trim()];
+      if (!choice) {
+        await sendWhatsAppMessage(
+          from,
+          "Please reply with just the number: 1 for Consultation, 2 for Cleaning, or 3 for Other."
+        );
+        break;
+      }
+      await saveConversation(from, {
+        reason: choice.label,
+        durationMinutes: choice.durationMinutes,
+        state: 'ASK_SLOT_PLACEHOLDER',
+        updatedAt: FieldValue.serverTimestamp()
+        });
       await sendWhatsAppMessage(
         from,
-        `Got it!\nName: ${convo.name}\nReason: ${reason}\n\n(Time slot booking is coming very soon — thanks for testing!)`
+        `Got it!\nName: ${convo.name}\nReason: ${choice.label}\n\n(Time slot booking is coming very soon — thanks for testing! Type "restart" anytime to start over.)`
+        );
+      break;
+    }
+    case 'ASK_SLOT_PLACEHOLDER': {
+      await sendWhatsAppMessage(
+      from,
+      'Your details are saved! Time slot booking is coming very soon. Type "restart" if you\'d like to update your info.'
       );
       break;
     }
